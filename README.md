@@ -2,7 +2,7 @@
 USB to serial driver for USB to serial chip ch340, ch341, etc.
 
 1. BUILDING
- $ sudo make
+$ sudo make
  
 2. LOAD
  $ sudo make load
