@@ -3,13 +3,13 @@ USB to serial driver for USB to serial chip ch340, ch341, etc.
 
 1. BUILDING
  $ sudo make
-
+ 
 2. LOAD
  $ sudo make load
  or you can use
  $ sudo insmod ch34x.ko
  
-3. UNLOAD
+ 3. UNLOAD
  $ sudo make unload
  or you can use
  $ sudo rmmod ch34x.ko
