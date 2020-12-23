@@ -21,6 +21,7 @@
  * V1.16 - added supports for application to get uart state
  *		 - removed tty throttle methods
  *		 - submits urbs when uart open while not probe
+ *		 - fixed tty kref errors in dtr_rts
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License as published by
@@ -70,7 +71,7 @@
 
 #define DRIVER_AUTHOR "TECH39"
 #define DRIVER_DESC "USB to serial driver for USB to serial chip ch340, ch341, etc."
-#define VERSION_DESC "V1.16 On 2020.12.21"
+#define VERSION_DESC "V1.16 On 2020.12.23"
 
 static struct usb_driver ch34x_driver;
 static struct tty_driver *ch34x_tty_driver;
@@ -200,7 +201,7 @@ static inline int ch34x_set_control(struct ch34x *ch34x, int control)
             value, 0x0000);
 }
 
-static inline int ch34x_set_line(struct ch34x *ch34x, struct usb_cdc_line_coding *line)
+static inline int ch34x_set_line(struct ch34x *ch34x, struct usb_ch34x_line_coding *line)
 {
 	return 0;
 }
@@ -360,48 +361,77 @@ static void ch34x_update_status(struct ch34x *ch34x,
 	unsigned long flags;
 	u8 status;
 	u8 difference;
+	u8 type = data[0];
 
 	if (len < 4)
 		return;
 
-	status = ~data[2] & CH34X_MODEM_STAT;
-
-	if (!ch34x->clocal && (ch34x->ctrlin & status & CH34X_CTRL_DCD)) {
-		dev_dbg(&ch34x->data->dev, "%s - calling hangup\n",
-				__func__);
-		tty_port_tty_hangup(&ch34x->port, false);
-	}
-
-	spin_lock_irqsave(&ch34x->read_lock, flags);
-	difference = status ^ ch34x->ctrlin;
-	ch34x->ctrlin = status;
-	if (data[1] & CH34X_MULT_STAT)
-		dev_vdbg(&ch34x->data->dev, "%s - multiple status change\n", __func__);
-
-	if (!difference) {
+	switch (type) {
+	case CH34X_CTRL_TYPE_MODEM:
+		status = ~data[2] & CH34X_MODEM_STAT;
+	
+		if (!ch34x->clocal && (ch34x->ctrlin & status & CH34X_CTRL_DCD)) {
+			dev_dbg(&ch34x->data->dev, "%s - calling hangup\n",
+					__func__);
+			tty_port_tty_hangup(&ch34x->port, false);
+		}
+		
+		spin_lock_irqsave(&ch34x->read_lock, flags);
+		difference = status ^ ch34x->ctrlin;
+		ch34x->ctrlin = status;
+		ch34x->oldcount = ch34x->iocount;
+		if (!difference) {
+			spin_unlock_irqrestore(&ch34x->read_lock, flags);
+			return;
+		}		
+		if (difference & CH34X_CTRL_CTS) {
+			dev_vdbg(&ch34x->data->dev, "%s - cts change\n", __func__);
+			ch34x->iocount.cts++;
+		}
+		if (difference & CH34X_CTRL_DSR) {
+			dev_vdbg(&ch34x->data->dev, "%s - dsr change\n", __func__);
+			ch34x->iocount.dsr++;
+		}
+		if (difference & CH34X_CTRL_RI) {
+			dev_vdbg(&ch34x->data->dev, "%s - rng change\n", __func__);
+			ch34x->iocount.rng++;
+		}
+		if (difference & CH34X_CTRL_DCD) {
+			dev_vdbg(&ch34x->data->dev, "%s - dcd change\n", __func__);
+			ch34x->iocount.dcd++;
+		}
 		spin_unlock_irqrestore(&ch34x->read_lock, flags);
-		return;
+		wake_up_interruptible(&ch34x->wioctl);
+		break;
+	case CH34X_CTRL_TYPE_OVERRUN:
+		spin_lock_irqsave(&ch34x->read_lock, flags);
+		ch34x->oldcount = ch34x->iocount;
+		dev_err(&ch34x->data->dev, "%s - overrun error\n", __func__);
+		ch34x->iocount.overrun++;
+		spin_unlock_irqrestore(&ch34x->read_lock, flags);
+		break;
+	case CH34X_CTRL_TYPE_PARITY:
+		spin_lock_irqsave(&ch34x->read_lock, flags);
+		ch34x->oldcount = ch34x->iocount;
+		dev_err(&ch34x->data->dev, "%s - parity error\n", __func__);
+		ch34x->iocount.parity++;
+		spin_unlock_irqrestore(&ch34x->read_lock, flags);		
+		break;
+	case CH34X_CTRL_TYPE_FRAMING:
+		spin_lock_irqsave(&ch34x->read_lock, flags);
+		ch34x->oldcount = ch34x->iocount;
+		dev_err(&ch34x->data->dev, "%s - frame error\n", __func__);
+		ch34x->iocount.frame++;
+		spin_unlock_irqrestore(&ch34x->read_lock, flags);		
+		break;
+	default:
+		dev_err(&ch34x->data->dev,
+			"%s - unknown status received:"
+			"len:%d, data0:0x%x, data1:0x%x\n",
+			__func__,
+			(int)len, data[0], data[1]);
+		break;
 	}
-
-	if (difference & CH34X_CTRL_CTS) {
-		dev_vdbg(&ch34x->data->dev, "%s - cts change\n", __func__);
-		ch34x->iocount.cts++;
-	}
-	if (difference & CH34X_CTRL_DSR) {
-		dev_vdbg(&ch34x->data->dev, "%s - dsr change\n", __func__);
-		ch34x->iocount.dsr++;
-	}
-	if (difference & CH34X_CTRL_RI) {
-		dev_vdbg(&ch34x->data->dev, "%s - rng change\n", __func__);
-		ch34x->iocount.rng++;
-	}
-	if (difference & CH34X_CTRL_DCD) {
-		dev_vdbg(&ch34x->data->dev, "%s - dcd change\n", __func__);
-		ch34x->iocount.dcd++;
-	}
-	spin_unlock_irqrestore(&ch34x->read_lock, flags);
-
-	wake_up_interruptible(&ch34x->wioctl);
 }
 
 /*
@@ -589,7 +619,6 @@ static int ch34x_tty_open(struct tty_struct *tty, struct file *filp)
 static void ch34x_port_dtr_rts(struct tty_port *port, int raise)
 {
 	struct ch34x *ch34x = container_of(port, struct ch34x, port);
-	struct tty_struct *tty = tty_port_tty_get(port);
 	int res;
 
 	dev_dbg(&ch34x->data->dev, "%s\n", __func__);
@@ -598,9 +627,8 @@ static void ch34x_port_dtr_rts(struct tty_port *port, int raise)
 		ch34x->ctrlout |= CH34X_CTRL_DTR | CH34X_CTRL_RTS;
 	else
 		ch34x->ctrlout &= ~(CH34X_CTRL_DTR | CH34X_CTRL_RTS);
-	if (C_CRTSCTS(tty))
+	if (ch34x->hardflow)
 		ch34x->ctrlout |= CH34X_CTRL_RTS;
-
 	res = ch34x_set_control(ch34x, ch34x->ctrlout);
 	if (res)
 		dev_err(&ch34x->data->dev, "failed to set dtr/rts\n");
@@ -644,7 +672,6 @@ static int ch34x_port_activate(struct tty_port *port, struct tty_struct *tty)
 	retval = ch34x_submit_read_urbs(ch34x, GFP_KERNEL);
 	if (retval)
 		goto error_submit_read_urbs;
-
 	usb_autopm_put_interface(ch34x->data);
 
 	mutex_unlock(&ch34x->mutex);
@@ -655,7 +682,7 @@ error_submit_read_urbs:
 	for (i = 0; i < ch34x->rx_buflimit; i++)
 		usb_kill_urb(ch34x->read_urbs[i]);
 error_submit_urb:
-	usb_kill_urb(ch34x->ctrlurb);	
+	usb_kill_urb(ch34x->ctrlurb);
 error_configure:
 	usb_autopm_put_interface(ch34x->data);
 error_get_interface:
@@ -684,7 +711,7 @@ static void ch34x_port_shutdown(struct tty_port *port)
 	int i;
 	
 	dev_dbg(&ch34x->data->dev, "%s\n", __func__);
-	
+
 	usb_autopm_get_interface_no_resume(ch34x->data);
 	ch34x->data->needs_remote_wakeup = 0;
 	usb_autopm_put_interface(ch34x->data);
@@ -963,25 +990,25 @@ static int wait_serial_change(struct ch34x *ch34x, unsigned long arg)
 		ch34x->oldcount = new;
 		spin_unlock_irq(&ch34x->read_lock);
 
+		if ((arg & TIOCM_CTS) &&
+			old.cts != new.cts)
+			break;
 		if ((arg & TIOCM_DSR) &&
 			old.dsr != new.dsr)
-			break;
-		if ((arg & TIOCM_CD)  &&
-			old.dcd != new.dcd)
 			break;
 		if ((arg & TIOCM_RI) &&
 			old.rng != new.rng)
 			break;
-
+		if ((arg & TIOCM_CD)  &&
+			old.dcd != new.dcd)
+			break;
+		
 		add_wait_queue(&ch34x->wioctl, &wait);
 		set_current_state(TASK_INTERRUPTIBLE);
 		schedule();
 		remove_wait_queue(&ch34x->wioctl, &wait);
 		if (ch34x->disconnected) {
-			if (arg & TIOCM_CD)
-				break;
-			else
-				rv = -ENODEV;
+			rv = -ENODEV;
 		} else {
 			if (signal_pending(current))
 				rv = -ERESTARTSYS;
@@ -998,14 +1025,14 @@ static int get_serial_usage(struct ch34x *ch34x,
 	int rv = 0;
 
 	memset(&icount, 0, sizeof(icount));
+	icount.cts = ch34x->iocount.cts;
 	icount.dsr = ch34x->iocount.dsr;
 	icount.rng = ch34x->iocount.rng;
 	icount.dcd = ch34x->iocount.dcd;
 	icount.frame = ch34x->iocount.frame;
 	icount.overrun = ch34x->iocount.overrun;
 	icount.parity = ch34x->iocount.parity;
-	icount.brk = ch34x->iocount.brk;
-
+	
 	if (copy_to_user(count, &icount, sizeof(icount)) > 0)
 		rv = -EFAULT;
 
@@ -1023,22 +1050,22 @@ static int ch34x_tty_ioctl(struct tty_struct *tty,
 	
 	switch (cmd) {
 	case TIOCGSERIAL: /* gets serial port data */
-		rv = get_serial_info(ch34x, (struct serial_struct __user *) arg);
+		rv = get_serial_info(ch34x, (struct serial_struct __user *)arg);
 		break;
 	case TIOCSSERIAL:
-		rv = set_serial_info(ch34x, (struct serial_struct __user *) arg);
+		rv = set_serial_info(ch34x, (struct serial_struct __user *)arg);
 		break;
 	case TIOCMIWAIT:
-		rv = usb_autopm_get_interface(ch34x->control);
+		rv = usb_autopm_get_interface(ch34x->data);
 		if (rv < 0) {
 			rv = -EIO;
 			break;
 		}
 		rv = wait_serial_change(ch34x, arg);
-		usb_autopm_put_interface(ch34x->control);
+		usb_autopm_put_interface(ch34x->data);
 		break;
 	case TIOCGICOUNT:
-		rv = get_serial_usage(ch34x, (struct serial_icounter_struct __user *) arg);
+		rv = get_serial_usage(ch34x, (struct serial_icounter_struct __user *)arg);
 		break;
 	}
 
@@ -1093,7 +1120,7 @@ static void ch34x_tty_set_termios(struct tty_struct *tty,
 {
 	struct ch34x *ch34x = tty->driver_data;
 	struct ktermios *termios = &tty->termios;
-	struct usb_cdc_line_coding newline;
+	struct usb_ch34x_line_coding newline;
 	int newctrl = ch34x->ctrlout;
 
 	unsigned char divisor = 0;
@@ -1196,16 +1223,19 @@ static void ch34x_tty_set_termios(struct tty_struct *tty,
 		dev_dbg(&ch34x->data->dev, "%s - set line: %d %d %d %d\n",
 			__func__,
 			newline.dwDTERate,
-			newline.bCharFormat, newline.bParityType,
-			newline.bDataBits);
+			newline.bDataBits, newline.bCharFormat,
+			newline.bParityType);
 	}
 	if (C_CRTSCTS(tty)) {
 		ch34x_control_out(ch34x, VENDOR_WRITE, 0x2727, 0x0101);	
 		newctrl |= CH34X_CTRL_RTS;
 		ch34x_set_control(ch34x, ch34x->ctrlout = newctrl);
+		ch34x->hardflow = true;
 	}
-	else
-		ch34x_control_out(ch34x, VENDOR_WRITE, 0x2727, 0x0000);	
+	else {
+		ch34x_control_out(ch34x, VENDOR_WRITE, 0x2727, 0x0000);
+		ch34x->hardflow = false;
+	}
 }
 
 static const struct tty_port_operations ch34x_port_ops = {
@@ -1286,6 +1316,9 @@ static int ch34x_probe(struct usb_interface *intf,
 	/* handle quirks deadly to normal probing*/
 
 	data_interface = usb_ifnum_to_if(usb_dev, 0);
+	
+	if (intf != data_interface)
+		return -ENODEV;
 
 	if (data_interface->cur_altsetting->desc.bNumEndpoints < 2 ||
 	    data_interface->cur_altsetting->desc.bNumEndpoints == 0)
@@ -1652,7 +1685,7 @@ static int __init ch34x_init(void)
 	ch34x_tty_driver = alloc_tty_driver(CH34X_TTY_MINORS);
 	if (!ch34x_tty_driver)
 		return -ENOMEM;
-	ch34x_tty_driver->driver_name = "ch34x-uart",
+	ch34x_tty_driver->driver_name = "ch34x_uart",
 	ch34x_tty_driver->name = "ttyCH341USB",
 	ch34x_tty_driver->major = CH34X_TTY_MAJOR,
 	ch34x_tty_driver->minor_start = 0,

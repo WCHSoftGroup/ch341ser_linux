@@ -52,10 +52,8 @@
 /* interrupt pipe definitions */
 /******************************/
 /* always 4 interrupt bytes */
-/* first irq byte normally 0x08 */
-/* second irq byte base 0x7d + below */
-/* third irq byte base 0x94 + below */
-/* fourth irq byte normally 0xee */
+/* first irq byte indicates uart status */
+/* third irq byte indicates modem status */
 
 /* second interrupt byte */
 #define CH34X_MULT_STAT 0x04 /* multiple status since last interrupt event */
@@ -73,13 +71,10 @@
 /*
  * Input line errors.
  */
-#define CH34X_CTRL_STATE			0x00
-#define CH34X_CTRL_OVERRUN			0x01
-#define CH34X_CTRL_BREAK				
-#define CH34X_CTRL_PARITY			0x02
-#define CH34X_CTRL_FRAME			0x06
-#define CH34X_CTRL_RECV				0x02
-#define CH34X_CTRL_STATE_TRANSMIT	0x07
+#define CH34X_CTRL_TYPE_MODEM	BIT(3)
+#define CH34X_CTRL_TYPE_FRAMING BIT(2) | BIT(6)
+#define CH34X_CTRL_TYPE_PARITY  BIT(2)
+#define CH34X_CTRL_TYPE_OVERRUN BIT(1)
 
 /*
  * LCR defines.
@@ -151,7 +146,6 @@ struct usb_ch34x_line_coding {
 
 struct ch34x {
 	struct usb_device *dev;				/* the corresponding usb device */
-	struct usb_interface *control;			/* control interface */
 	struct usb_interface *data;			/* data interface */
 	struct tty_port port;			 	/* our tty port data */
 	struct urb *ctrlurb;				/* urbs */
@@ -184,6 +178,7 @@ struct ch34x {
 	u8 bInterval;
 	struct usb_anchor delayed;			/* writes queued for a device about to be woken */
 	unsigned long quirks;
+	bool hardflow;
 };
 
 #define CDC_DATA_INTERFACE_TYPE	0x0a
