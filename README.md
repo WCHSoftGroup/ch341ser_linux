@@ -1,25 +1,22 @@
-# ch34x_linux
-USB to serial driver for USB to serial chip ch340, ch341, etc.
+# ch341 linux serial driver
+## Description
 
-1. BUILDING
-   sudo make
+​	USB serial driver for USB to UART chip ch340, ch341, etc. In fact Linux mainline kernels have built-in ch341 serial driver since kernel version 2.6.24. The location is: drivers/usb/serial/ch341.c, it's a pity that the built-in driver was not released by us at first, so there are some bugs with it. We suggest our customers use this driver.
 
-2. LOAD
- $ sudo make load
- or you can use
- $ sudo insmod ch34x.ko
- 
-3. UNLOAD
- $ sudo make unload
- or you can use
- $ sudo rmmod ch34x.ko
- 
-4. AUTOLOAD SINCE BOOT
-  $ sudo make install
-  
-5. CANCEL AUTOLOAD SINCE BOOT
-  $ sudo make uninstall
-  
-Note
-  If you wanna look up more details, please open debug switch(DEBUG && VERBOSE_DEBUG) in ch34x.c
-  Any question, you can send feedback to mail: tech@wch.cn
+1. Open "Terminal"
+2. Switch to "driver" directory
+3. Compile the driver using "make", you will see the module "ch341.ko" if successful
+4. Type "sudo make load" or "sudo insmod ch341.ko" to load the driver dynamically
+5. Type "sudo make unload" or "sudo rmmod ch341.ko" to unload the driver
+6. Type "sudo make install" to make the driver work permanently
+7. Type "sudo make uninstall" to remove the driver
+8. You can refer to the link below to acquire uart application, you can use gcc or Cross-compile with cross-gcc
+   https://github.com/WCHSoftGroup/tty_uart
+
+​	Before the driver works, you should make sure that the usb device has been plugged in and is working properly, you can use shell command "lsusb" or "dmesg" to confirm that, USB VID of these devices are [1A86], you can view all IDs from the id table which defined in "ch341.c".
+
+​	If the device works well, the driver will created tty devices named "ttyCH341USBx" in /dev directory.
+
+## Note
+
+​	Any question, you can send feedback to mail: tech@wch.cn
