@@ -13,14 +13,12 @@
  * Kernel version beyond 3.4.x
  * Update Log:
  * V1.0 - initial version
- * V1.01 - added supports for high baudrates
- * V1.10 - added supports for modem signal, flow control, etc.
- * V1.11 - fixed usb pid supports
- * V1.12 - fixed baud rate 0 bugs and add some debug messages 
- * V1.13 - special setting on usb packet upload timeout
- * V1.14 - changed read urb length to ep size
- * V1.15 - fixed hardware flowcontrol bugs
- * V1.16 - added supports for application to get uart state
+ * V1.1 - added supports for high baudrates, modem signal, flow control, etc.
+ * V1.2 - fixed baud rate 0 bugs and add some debug messages 
+ * V1.3 - special setting on usb packet upload timeout
+ * V1.4 - changed read urb length to ep size
+ * V1.5 - fixed hardware flowcontrol bugs
+ * V1.6 - added supports for application to get uart state
  *		 - removed tty throttle methods
  *		 - submits urbs when uart open while not probe
  *		 - fixed tty kref errors in dtr_rts
@@ -59,7 +57,7 @@
 
 #define DRIVER_AUTHOR "TECH39"
 #define DRIVER_DESC "USB serial driver for ch340, ch341, etc."
-#define VERSION_DESC "V1.16 On 2020.12.23"
+#define VERSION_DESC "V1.6 On 2020.12.23"
 
 static struct usb_driver ch341_driver;
 static struct tty_driver *ch341_tty_driver;
@@ -1397,11 +1395,6 @@ static int ch341_probe(struct usb_interface *intf,
 		goto alloc_fail7;
 	}
 
-	if (quirks & CLEAR_HALT_CONDITIONS) {
-		usb_clear_halt(usb_dev, usb_rcvbulkpipe(usb_dev, epread->bEndpointAddress));
-		usb_clear_halt(usb_dev, usb_sndbulkpipe(usb_dev, epwrite->bEndpointAddress));
-	}
-
 	dev_dbg(&intf->dev, "ch341_probe finished!\n");
 
 	return 0;
@@ -1522,7 +1515,11 @@ static int ch341_resume(struct usb_interface *intf)
 	if (--ch341->susp_count)
 		goto out;
 
+#if (LINUX_VERSION_CODE >= KERNEL_VERSION(4, 7, 0))
+	if (tty_port_initialized(&ch341->port)) {
+#else
 	if (test_bit(ASYNCB_INITIALIZED, &ch341->port.flags)) {
+#endif	
 		rv = usb_submit_urb(ch341->ctrlurb, GFP_ATOMIC);
 
 		for (;;) {
@@ -1553,7 +1550,11 @@ static int ch341_reset_resume(struct usb_interface *intf)
 	struct ch341 *ch341 = usb_get_intfdata(intf);
 
 	dev_dbg(&intf->dev, "%s\n", __func__);
+#if (LINUX_VERSION_CODE >= KERNEL_VERSION(4, 7, 0))
+	if (tty_port_initialized(&ch341->port))
+#else
 	if (test_bit(ASYNCB_INITIALIZED, &ch341->port.flags))
+#endif
 		tty_port_tty_hangup(&ch341->port, false);
 
 	return ch341_resume(intf);
@@ -1566,22 +1567,11 @@ static int ch341_reset_resume(struct usb_interface *intf)
  */
 
 static const struct usb_device_id ch341_ids[] = {
-	/* quirky and broken devices */
-	{ USB_DEVICE(0x1a86, 0x7523), /* ch340 chip */
-	.driver_info = CLEAR_HALT_CONDITIONS, },
-
-	{ USB_DEVICE(0x1a86, 0x7522), /* ch340K chip */
-	.driver_info = CLEAR_HALT_CONDITIONS, },
-
-	{ USB_DEVICE(0x1a86, 0x5523), /* ch341 chip */
-	.driver_info = CLEAR_HALT_CONDITIONS, },
-	
-	{ USB_DEVICE(0x1a86, 0xE523), /* ch330 chip */
-	.driver_info = CLEAR_HALT_CONDITIONS, },
-	
-	{ USB_DEVICE(0x4348, 0x5523), /* ch340 custom chip */
-	.driver_info = CLEAR_HALT_CONDITIONS, },
-
+	{ USB_DEVICE(0x1a86, 0x7523), }, /* ch340 chip */
+	{ USB_DEVICE(0x1a86, 0x7522), }, /* ch340K chip */
+	{ USB_DEVICE(0x1a86, 0x5523), }, /* ch341 chip */
+	{ USB_DEVICE(0x1a86, 0xE523), }, /* ch330 chip */
+	{ USB_DEVICE(0x4348, 0x5523), }, /* ch340 custom chip */
 	{ }
 };
 
@@ -1614,7 +1604,7 @@ static const struct tty_operations ch341_ops = {
 	.cleanup =		ch341_tty_cleanup,
 	.hangup =		ch341_tty_hangup,
 	.write =		ch341_tty_write,
-	.write_room =		ch341_tty_write_room,
+	.write_room =	ch341_tty_write_room,
 	.ioctl =		ch341_tty_ioctl,
 	.chars_in_buffer =	ch341_tty_chars_in_buffer,
 	.break_ctl =		ch341_tty_break_ctl,
