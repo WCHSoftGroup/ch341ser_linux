@@ -68,7 +68,7 @@ static DEFINE_IDR(ch341_minors);
 static DEFINE_MUTEX(ch341_minors_lock);
 
 static void ch341_tty_set_termios(struct tty_struct *tty,
-                                  struct ktermios *termios_old);
+                                  const struct ktermios *termios_old);
 
 /*
  * ch341_minors accessors
@@ -1077,7 +1077,7 @@ static int ch341_get(unsigned int baval,
 }
 
 static void ch341_tty_set_termios(struct tty_struct *tty,
-                                  struct ktermios *termios_old)
+                                  const struct ktermios *termios_old)
 {
     struct ch341 *ch341 = tty->driver_data;
     struct ktermios *termios = &tty->termios;
