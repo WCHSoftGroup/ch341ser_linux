@@ -1,7 +1,7 @@
 # ch341 linux serial driver
 ## Description
 
-​	USB serial driver for USB to UART chip ch340, ch341, etc. In fact Linux mainline kernels have built-in ch341 serial driver since kernel version 2.6.24. The location is: drivers/usb/serial/ch341.c, it's a pity that the built-in driver cannot be kept up to date. We suggest our customers use this driver.
+USB serial driver for USB to UART chip ch340, ch341, etc. In fact Linux mainline kernels have built-in ch341 serial driver since kernel version 2.6.24. The location is: drivers/usb/serial/ch341.c, it's a pity that the built-in driver cannot be kept up to date. We suggest our customers to use this driver.
 
 1. Open "Terminal"
 2. Switch to "driver" directory
@@ -13,10 +13,10 @@
 8. You can refer to the link below to acquire uart application, you can use gcc or Cross-compile with cross-gcc
    https://github.com/WCHSoftGroup/tty_uart
 
-​	Before the driver works, you should make sure that the usb device has been plugged in and is working properly, you can use shell command "lsusb" or "dmesg" to confirm that, USB VID of these devices are [1A86], you can view all IDs from the id table which defined in "ch341.c".
+Before the driver works, you should make sure that the usb device has been plugged in and is working properly, you can use shell command "lsusb" or "dmesg" to confirm that, USB VID of these devices are [1a86], you can view all IDs from the id table which defined in "ch341.c".
 
-​	If the device works well, the driver will created tty devices named "ttyCH341USBx" in /dev directory.
+If the device works well, the driver will created tty devices named "ttyCH341USBx" in /dev directory.
 
 ## Note
 
-​	Any question, you can send feedback to mail: tech@wch.cn
+Any question, you can send feedback to mail: tech@wch.cn
