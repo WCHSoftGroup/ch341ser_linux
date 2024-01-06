@@ -643,7 +643,11 @@ static void ch341_tty_close(struct tty_struct *tty, struct file *filp)
 	tty_port_close(&ch341->port, tty, filp);
 }
 
+#if (LINUX_VERSION_CODE >= KERNEL_VERSION(6, 6, 0))
+static ssize_t ch341_tty_write(struct tty_struct *tty, const unsigned char *buf, size_t count)
+#else
 static int ch341_tty_write(struct tty_struct *tty, const unsigned char *buf, int count)
+#endif
 {
 	struct ch341 *ch341 = tty->driver_data;
 	int stat;
