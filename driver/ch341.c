@@ -1,7 +1,7 @@
 /*
  * CH340/CH341 USB to serial port driver
  *
- * Copyright (C) 2023 Nanjing Qinheng Microelectronics Co., Ltd.
+ * Copyright (C) 2024 Nanjing Qinheng Microelectronics Co., Ltd.
  * Web:      http://wch.cn
  * Author:   WCH <tech@wch.cn>
  *
@@ -26,6 +26,7 @@
  *      - add support for kernel version beyond 5.14.x
  *      - fix data analysis in status ep callback
  * V1.7 - add support for kernel version beyond 6.3.x
+ * V1.8 - add support for kernel version beyond 6.5.x
  */
 
 #define DEBUG
@@ -61,7 +62,7 @@
 
 #define DRIVER_AUTHOR "WCH"
 #define DRIVER_DESC   "USB serial driver for ch340, ch341, etc."
-#define VERSION_DESC  "V1.7 On 2023.07"
+#define VERSION_DESC  "V1.8 On 2024.01"
 
 static struct usb_driver ch341_driver;
 static struct tty_driver *ch341_tty_driver;
@@ -514,7 +515,6 @@ static int ch341_tty_open(struct tty_struct *tty, struct file *filp)
 	return tty_port_open(&ch341->port, tty, filp);
 }
 
-
 #if (LINUX_VERSION_CODE >= KERNEL_VERSION(6, 3, 0))
 static void ch341_port_dtr_rts(struct tty_port *port, bool raise)
 #else
@@ -643,7 +643,11 @@ static void ch341_tty_close(struct tty_struct *tty, struct file *filp)
 	tty_port_close(&ch341->port, tty, filp);
 }
 
+#if (LINUX_VERSION_CODE >= KERNEL_VERSION(6, 6, 0))
+static ssize_t ch341_tty_write(struct tty_struct *tty, const u8 *buf, size_t count)
+#else
 static int ch341_tty_write(struct tty_struct *tty, const unsigned char *buf, int count)
+#endif
 {
 	struct ch341 *ch341 = tty->driver_data;
 	int stat;
@@ -1487,7 +1491,7 @@ static int __init ch341_init(void)
 	ch341_tty_driver->flags = TTY_DRIVER_REAL_RAW | TTY_DRIVER_DYNAMIC_DEV;
 #endif
 	ch341_tty_driver->init_termios = tty_std_termios;
-	ch341_tty_driver->init_termios.c_cflag = B9600 | CS8 | CREAD | HUPCL | CLOCAL;
+	ch341_tty_driver->init_termios.c_cflag = B0 | CS8 | CREAD | HUPCL | CLOCAL;
 	tty_set_operations(ch341_tty_driver, &ch341_ops);
 
 	retval = tty_register_driver(ch341_tty_driver);
