@@ -1011,6 +1011,7 @@ static void ch341_tty_set_termios(struct tty_struct *tty, struct ktermios *termi
 	unsigned char reg_value = 0;
 	unsigned short value = 0;
 	unsigned short index = 0;
+	unsigned char timeout = 0;
 
 	if (termios_old && !tty_termios_hw_change(&tty->termios, termios_old)) {
 		return;
@@ -1084,6 +1085,11 @@ static void ch341_tty_set_termios(struct tty_struct *tty, struct ktermios *termi
 	index |= 0x80 | divisor;
 	index |= (unsigned short)factor << 8;
 	ch341_control_out(ch341, CMD_C1, value, index);
+
+	timeout = 76800 / newline.dwDTERate;
+	if (timeout < 0x07)
+		timeout = 0x07;
+	ch341_control_out(ch341, CMD_W, 0x0f2c, timeout);
 
 	if (newctrl != ch341->ctrlout)
 		ch341_set_control(ch341, ch341->ctrlout = newctrl);
@@ -1278,6 +1284,7 @@ static int ch341_probe(struct usb_interface *intf, const struct usb_device_id *i
 	usb_set_intfdata(data_interface, ch341);
 
 	usb_get_intf(data_interface);
+	ch341->line.dwDTERate = 9600;
 	tty_dev = tty_port_register_device(&ch341->port, ch341_tty_driver, minor, &data_interface->dev);
 	if (IS_ERR(tty_dev)) {
 		rv = PTR_ERR(tty_dev);
