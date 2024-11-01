@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0+
 /*
  * CH340/CH341 USB to serial port driver
  *
@@ -10,7 +11,8 @@
  * the Free Software Foundation; either version 2 of the License, or
  * (at your option) any later version.
  *
- * System require:  Kernel version beyond 3.4.x
+ * System require:
+ * Kernel version beyond 3.2.x
  *
  * Update Log:
  * V1.0 - initial version
@@ -42,6 +44,7 @@
 #include <linux/list.h>
 #include <linux/module.h>
 #include <linux/mutex.h>
+#include <linux/seq_file.h>
 #include <linux/serial.h>
 #include <linux/slab.h>
 #include <linux/tty.h>
@@ -61,26 +64,33 @@
 #include "ch341.h"
 
 #define DRIVER_AUTHOR "WCH"
-#define DRIVER_DESC   "USB serial driver for ch340, ch341, etc."
-#define VERSION_DESC  "V1.8 On 2024.01"
+#define DRIVER_DESC "USB serial driver for ch340, ch341, etc."
+#define VERSION_DESC "V1.8 On 2024.08"
 
 static struct usb_driver ch341_driver;
 static struct tty_driver *ch341_tty_driver;
 
+#if (LINUX_VERSION_CODE >= KERNEL_VERSION(3, 5, 0))
 static DEFINE_IDR(ch341_minors);
+#else
+static struct ch341 *ch341_table[CH341_TTY_MINORS];
+#endif
 static DEFINE_MUTEX(ch341_minors_lock);
 
 #if (LINUX_VERSION_CODE >= KERNEL_VERSION(6, 1, 0))
-static void ch341_tty_set_termios(struct tty_struct *tty, const struct ktermios *termios_old);
+static void ch341_tty_set_termios(struct tty_struct *tty,
+				  const struct ktermios *termios_old);
 #else
-static void ch341_tty_set_termios(struct tty_struct *tty, struct ktermios *termios_old);
+static void ch341_tty_set_termios(struct tty_struct *tty,
+				  struct ktermios *termios_old);
 #endif
 
+#if (LINUX_VERSION_CODE >= KERNEL_VERSION(3, 5, 0))
 /*
- * Look up an ch341 structure by minor. If found and not disconnected, increment
- * its refcount and return it with its mutex held.
+ * Look up an ch341 structure by minor. If found and not disconnected,
+ * increment its refcount and return it with its mutex held.
  */
-static struct ch341 *ch341_get_by_minor(unsigned int minor)
+static struct ch341 *ch341_get_by_index(unsigned int minor)
 {
 	struct ch341 *ch341;
 
@@ -101,14 +111,16 @@ static struct ch341 *ch341_get_by_minor(unsigned int minor)
 }
 
 /*
- * Try to find an available minor number and if found, associate it with 'ch341'.
+ * Try to find an available minor number and if found,
+ * associate it with 'ch341'.
  */
 static int ch341_alloc_minor(struct ch341 *ch341)
 {
 	int minor;
 
 	mutex_lock(&ch341_minors_lock);
-	minor = idr_alloc(&ch341_minors, ch341, 0, CH341_TTY_MINORS, GFP_KERNEL);
+	minor = idr_alloc(&ch341_minors, ch341, 0, CH341_TTY_MINORS,
+			  GFP_KERNEL);
 	mutex_unlock(&ch341_minors_lock);
 
 	return minor;
@@ -122,10 +134,64 @@ static void ch341_release_minor(struct ch341 *ch341)
 	mutex_unlock(&ch341_minors_lock);
 }
 
+#else
+
 /*
- * Functions for CH341 control messages.
+ * Look up an CH341 structure by index. If found and not disconnected,
+ * increment its refcount and return it with its mutex held.
  */
-static int ch341_control_out(struct ch341 *ch341, u8 request, u16 value, u16 index)
+static struct ch341 *ch341_get_by_index(unsigned int index)
+{
+	struct ch341 *ch341;
+
+	mutex_lock(&ch341_minors_lock);
+	ch341 = ch341_table[index];
+	if (ch341) {
+		mutex_lock(&ch341->mutex);
+		if (ch341->disconnected) {
+			mutex_unlock(&ch341->mutex);
+			ch341 = NULL;
+		} else {
+			tty_port_get(&ch341->port);
+			mutex_unlock(&ch341->mutex);
+		}
+	}
+	mutex_unlock(&ch341_minors_lock);
+
+	return ch341;
+}
+
+/*
+ * Try to find an available minor number and if found,
+ * associate it with 'ch341'.
+ */
+static int ch341_alloc_minor(struct ch341 *ch341)
+{
+	int minor;
+
+	mutex_lock(&ch341_minors_lock);
+	for (minor = 0; minor < CH341_TTY_MINORS; minor++) {
+		if (!ch341_table[minor]) {
+			ch341_table[minor] = ch341;
+			break;
+		}
+	}
+	mutex_unlock(&ch341_minors_lock);
+
+	return minor;
+}
+
+/* Release the minor number associated with 'ch341'. */
+static void ch341_release_minor(struct ch341 *ch341)
+{
+	mutex_lock(&ch341_minors_lock);
+	ch341_table[ch341->minor] = NULL;
+	mutex_unlock(&ch341_minors_lock);
+}
+
+#endif
+static int ch341_control_out(struct ch341 *ch341, u8 request, u16 value,
+			     u16 index)
 {
 	int retval;
 
@@ -133,16 +199,18 @@ static int ch341_control_out(struct ch341 *ch341, u8 request, u16 value, u16 ind
 	if (retval)
 		return retval;
 
-	retval = usb_control_msg(ch341->dev, usb_sndctrlpipe(ch341->dev, 0), request,
-				 USB_TYPE_VENDOR | USB_RECIP_DEVICE | USB_DIR_OUT, value, index, NULL, 0,
-				 DEFAULT_TIMEOUT);
+	retval = usb_control_msg(
+		ch341->dev, usb_sndctrlpipe(ch341->dev, 0), request,
+		USB_TYPE_VENDOR | USB_RECIP_DEVICE | USB_DIR_OUT, value,
+		index, NULL, 0, DEFAULT_TIMEOUT);
 
 	usb_autopm_put_interface(ch341->data);
 
 	return retval < 0 ? retval : 0;
 }
 
-static int ch341_control_in(struct ch341 *ch341, u8 request, u16 value, u16 index, char *buf, unsigned bufsize)
+static int ch341_control_in(struct ch341 *ch341, u8 request, u16 value,
+			    u16 index, char *buf, unsigned bufsize)
 {
 	int retval;
 
@@ -150,9 +218,10 @@ static int ch341_control_in(struct ch341 *ch341, u8 request, u16 value, u16 inde
 	if (retval)
 		return retval;
 
-	retval = usb_control_msg(ch341->dev, usb_rcvctrlpipe(ch341->dev, 0), request,
-				 USB_TYPE_VENDOR | USB_RECIP_DEVICE | USB_DIR_IN, value, index, buf, bufsize,
-				 DEFAULT_TIMEOUT);
+	retval = usb_control_msg(
+		ch341->dev, usb_rcvctrlpipe(ch341->dev, 0), request,
+		USB_TYPE_VENDOR | USB_RECIP_DEVICE | USB_DIR_IN, value,
+		index, buf, bufsize, DEFAULT_TIMEOUT);
 
 	usb_autopm_put_interface(ch341->data);
 
@@ -168,7 +237,8 @@ static inline int ch341_set_control(struct ch341 *ch341, int control)
 	return ch341_control_out(ch341, CMD_C2, value, 0x0000);
 }
 
-static inline int ch341_set_line(struct ch341 *ch341, struct usb_ch341_line_coding *line)
+static inline int ch341_set_line(struct ch341 *ch341,
+				 struct usb_ch341_line_coding *line)
 {
 	return 0;
 }
@@ -293,13 +363,16 @@ static int ch341_start_wb(struct ch341 *ch341, struct ch341_wb *wb)
 
 	rc = usb_submit_urb(wb->urb, GFP_ATOMIC);
 	if (rc < 0) {
-		dev_err(&ch341->data->dev, "%s - usb_submit_urb(write bulk) failed: %d\n", __func__, rc);
+		dev_err(&ch341->data->dev,
+			"%s - usb_submit_urb(write bulk) failed: %d\n",
+			__func__, rc);
 		ch341_write_done(ch341, wb);
 	}
 	return rc;
 }
 
-static void ch341_update_status(struct ch341 *ch341, unsigned char *data, size_t len)
+static void ch341_update_status(struct ch341 *ch341, unsigned char *data,
+				size_t len)
 {
 	unsigned long flags;
 	u8 status;
@@ -313,8 +386,15 @@ static void ch341_update_status(struct ch341 *ch341, unsigned char *data, size_t
 	if (type & CH341_CTT_M) {
 		status = ~data[2] & CH341_CTI_ST;
 
-		if (!ch341->clocal && (ch341->ctrlin & status & CH341_CTI_DC)) {
+		if (!ch341->clocal &&
+		    (ch341->ctrlin & status & CH341_CTI_DC)) {
+#if (LINUX_VERSION_CODE < KERNEL_VERSION(3, 10, 0))
+			struct tty_struct *tty =
+				tty_port_tty_get(&ch341->port);
+			tty_hangup(tty);
+#else
 			tty_port_tty_hangup(&ch341->port, false);
+#endif
 		}
 
 		spin_lock_irqsave(&ch341->read_lock, flags);
@@ -383,10 +463,14 @@ static void ch341_ctrl_irq(struct urb *urb)
 	case -ENOENT:
 	case -ESHUTDOWN:
 		/* this urb is terminated, clean up */
-		dev_dbg(&ch341->data->dev, "%s - urb shutting down with status: %d\n", __func__, status);
+		dev_dbg(&ch341->data->dev,
+			"%s - urb shutting down with status: %d\n",
+			__func__, status);
 		return;
 	default:
-		dev_dbg(&ch341->data->dev, "%s - nonzero urb status received: %d\n", __func__, status);
+		dev_dbg(&ch341->data->dev,
+			"%s - nonzero urb status received: %d\n", __func__,
+			status);
 		goto exit;
 	}
 
@@ -395,10 +479,13 @@ static void ch341_ctrl_irq(struct urb *urb)
 exit:
 	retval = usb_submit_urb(urb, GFP_ATOMIC);
 	if (retval && retval != -EPERM)
-		dev_err(&ch341->data->dev, "%s - usb_submit_urb failed: %d\n", __func__, retval);
+		dev_err(&ch341->data->dev,
+			"%s - usb_submit_urb failed: %d\n", __func__,
+			retval);
 }
 
-static int ch341_submit_read_urb(struct ch341 *ch341, int index, gfp_t mem_flags)
+static int ch341_submit_read_urb(struct ch341 *ch341, int index,
+				 gfp_t mem_flags)
 {
 	int res;
 
@@ -408,7 +495,9 @@ static int ch341_submit_read_urb(struct ch341 *ch341, int index, gfp_t mem_flags
 	res = usb_submit_urb(ch341->read_urbs[index], mem_flags);
 	if (res) {
 		if (res != -EPERM) {
-			dev_err(&ch341->data->dev, "%s - usb_submit_urb failed: %d\n", __func__, res);
+			dev_err(&ch341->data->dev,
+				"%s - usb_submit_urb failed: %d\n",
+				__func__, res);
 		}
 		set_bit(index, &ch341->read_urbs_free);
 		return res;
@@ -435,8 +524,17 @@ static void ch341_process_read_urb(struct ch341 *ch341, struct urb *urb)
 		return;
 
 	ch341->iocount.rx += urb->actual_length;
-	tty_insert_flip_string(&ch341->port, urb->transfer_buffer, urb->actual_length);
+
+#if (LINUX_VERSION_CODE >= KERNEL_VERSION(3, 9, 0))
+	tty_insert_flip_string(&ch341->port, urb->transfer_buffer,
+			       urb->actual_length);
 	tty_flip_buffer_push(&ch341->port);
+#else
+	struct tty_struct *tty = tty_port_tty_get(&ch341->port);
+	tty_insert_flip_string(tty, urb->transfer_buffer,
+			       urb->actual_length);
+	tty_flip_buffer_push(tty);
+#endif
 }
 
 static void ch341_read_bulk_callback(struct urb *urb)
@@ -447,12 +545,15 @@ static void ch341_read_bulk_callback(struct urb *urb)
 
 	if (!ch341->dev) {
 		set_bit(rb->index, &ch341->read_urbs_free);
-		dev_dbg(&ch341->data->dev, "%s - disconnected\n", __func__);
+		dev_dbg(&ch341->data->dev, "%s - disconnected\n",
+			__func__);
 		return;
 	}
 	if (status) {
 		set_bit(rb->index, &ch341->read_urbs_free);
-		dev_dbg(&ch341->data->dev, "%s - non-zero urb status: %d\n", __func__, status);
+		dev_dbg(&ch341->data->dev,
+			"%s - non-zero urb status: %d\n", __func__,
+			status);
 		return;
 	}
 	usb_mark_last_busy(ch341->dev);
@@ -470,7 +571,8 @@ static void ch341_write_bulk(struct urb *urb)
 	int status = urb->status;
 
 	if (status || (urb->actual_length != urb->transfer_buffer_length))
-		dev_vdbg(&ch341->data->dev, "%s - len %d/%d, status %d\n", __func__, urb->actual_length,
+		dev_vdbg(&ch341->data->dev, "%s - len %d/%d, status %d\n",
+			 __func__, urb->actual_length,
 			 urb->transfer_buffer_length, status);
 
 	ch341->iocount.tx += urb->actual_length;
@@ -483,24 +585,47 @@ static void ch341_write_bulk(struct urb *urb)
 static void ch341_softint(struct work_struct *work)
 {
 	struct ch341 *ch341 = container_of(work, struct ch341, work);
+#if (LINUX_VERSION_CODE < KERNEL_VERSION(3, 10, 0))
+	struct tty_struct *tty;
 
+	tty = tty_port_tty_get(&ch341->port);
+	if (!tty)
+		return;
+	tty_wakeup(tty);
+	tty_kref_put(tty);
+#else
 	tty_port_tty_wakeup(&ch341->port);
+#endif
 }
 
-static int ch341_tty_install(struct tty_driver *driver, struct tty_struct *tty)
+static int ch341_tty_install(struct tty_driver *driver,
+			     struct tty_struct *tty)
 {
 	struct ch341 *ch341;
 	int retval;
 
-	ch341 = ch341_get_by_minor(tty->index);
+	ch341 = ch341_get_by_index(tty->index);
 	if (!ch341)
 		return -ENODEV;
 
+#if (LINUX_VERSION_CODE >= KERNEL_VERSION(3, 5, 0))
 	retval = tty_standard_install(driver, tty);
 	if (retval)
 		goto error_init_termios;
 
 	tty->driver_data = ch341;
+#else
+	retval = tty_init_termios(tty);
+	if (retval)
+		goto error_init_termios;
+
+	tty->driver_data = ch341;
+
+	/* Final install (we use the default method) */
+	tty_driver_kref_get(driver);
+	tty->count++;
+	driver->ttys[tty->index] = tty;
+#endif
 	return 0;
 
 error_init_termios:
@@ -535,7 +660,8 @@ static void ch341_port_dtr_rts(struct tty_port *port, int raise)
 		dev_err(&ch341->data->dev, "failed to set dtr/rts\n");
 }
 
-static int ch341_port_activate(struct tty_port *port, struct tty_struct *tty)
+static int ch341_port_activate(struct tty_port *port,
+			       struct tty_struct *tty)
 {
 	struct ch341 *ch341 = container_of(port, struct ch341, port);
 	int retval = -ENODEV;
@@ -555,11 +681,15 @@ static int ch341_port_activate(struct tty_port *port, struct tty_struct *tty)
 	if (retval)
 		goto error_configure;
 
+#if (LINUX_VERSION_CODE >= KERNEL_VERSION(3, 18, 0))
 	ch341_tty_set_termios(tty, NULL);
+#endif
 
 	retval = usb_submit_urb(ch341->ctrlurb, GFP_KERNEL);
 	if (retval) {
-		dev_err(&ch341->data->dev, "%s - usb_submit_urb(ctrl cmd) failed\n", __func__);
+		dev_err(&ch341->data->dev,
+			"%s - usb_submit_urb(ctrl cmd) failed\n",
+			__func__);
 		goto error_submit_urb;
 	}
 
@@ -602,6 +732,7 @@ static void ch341_port_shutdown(struct tty_port *port)
 	struct ch341_wb *wb;
 	int i;
 
+#if (LINUX_VERSION_CODE >= KERNEL_VERSION(3, 16, 0))
 	usb_autopm_get_interface_no_resume(ch341->data);
 	ch341->data->needs_remote_wakeup = 0;
 	usb_autopm_put_interface(ch341->data);
@@ -620,6 +751,23 @@ static void ch341_port_shutdown(struct tty_port *port)
 		usb_kill_urb(ch341->wb[i].urb);
 	for (i = 0; i < ch341->rx_buflimit; i++)
 		usb_kill_urb(ch341->read_urbs[i]);
+#else
+	mutex_lock(&ch341->mutex);
+	if (!ch341->disconnected) {
+		usb_autopm_get_interface(ch341->data);
+		ch341_set_control(ch341, ch341->ctrlout = 0);
+
+		usb_kill_urb(ch341->ctrlurb);
+		for (i = 0; i < CH341_NW; i++)
+			usb_kill_urb(ch341->wb[i].urb);
+		for (i = 0; i < ch341->rx_buflimit; i++)
+			usb_kill_urb(ch341->read_urbs[i]);
+		ch341->data->needs_remote_wakeup = 0;
+
+		usb_autopm_put_interface(ch341->data);
+	}
+	mutex_unlock(&ch341->mutex);
+#endif
 }
 
 static void ch341_tty_cleanup(struct tty_struct *tty)
@@ -644,9 +792,11 @@ static void ch341_tty_close(struct tty_struct *tty, struct file *filp)
 }
 
 #if (LINUX_VERSION_CODE >= KERNEL_VERSION(6, 6, 0))
-static ssize_t ch341_tty_write(struct tty_struct *tty, const u8 *buf, size_t count)
+static ssize_t ch341_tty_write(struct tty_struct *tty, const u8 *buf,
+			       size_t count)
 #else
-static int ch341_tty_write(struct tty_struct *tty, const unsigned char *buf, int count)
+static int ch341_tty_write(struct tty_struct *tty,
+			   const unsigned char *buf, int count)
 #endif
 {
 	struct ch341 *ch341 = tty->driver_data;
@@ -736,7 +886,9 @@ static int ch341_tty_break_ctl(struct tty_struct *tty, int state)
 
 	retval = ch341_control_in(ch341, CMD_R, regval, 0, regbuf, 2);
 	if (retval < 0) {
-		dev_err(&ch341->data->dev, "%s - ch341_control_in error (%d)\n", __func__, retval);
+		dev_err(&ch341->data->dev,
+			"%s - ch341_control_in error (%d)\n", __func__,
+			retval);
 		goto out;
 	}
 	if (state != 0) {
@@ -750,7 +902,9 @@ static int ch341_tty_break_ctl(struct tty_struct *tty, int state)
 
 	retval = ch341_control_out(ch341, CMD_W, regval, reg_contents);
 	if (retval < 0)
-		dev_err(&ch341->data->dev, "%s - ch341_control_in error (%d)\n", __func__, retval);
+		dev_err(&ch341->data->dev,
+			"%s - ch341_control_in error (%d)\n", __func__,
+			retval);
 out:
 	kfree(regbuf);
 	return retval;
@@ -763,22 +917,28 @@ static int ch341_tty_tiocmget(struct tty_struct *tty)
 	unsigned int result;
 
 	spin_lock_irqsave(&ch341->read_lock, flags);
-	result = (ch341->ctrlout & CH341_CTO_D ? TIOCM_DTR : 0) | (ch341->ctrlout & CH341_CTO_R ? TIOCM_RTS : 0) |
-		 (ch341->ctrlin & CH341_CTI_C ? TIOCM_CTS : 0) | (ch341->ctrlin & CH341_CTI_DS ? TIOCM_DSR : 0) |
-		 (ch341->ctrlin & CH341_CTRL_RI ? TIOCM_RI : 0) | (ch341->ctrlin & CH341_CTI_DC ? TIOCM_CD : 0);
+	result = (ch341->ctrlout & CH341_CTO_D ? TIOCM_DTR : 0) |
+		 (ch341->ctrlout & CH341_CTO_R ? TIOCM_RTS : 0) |
+		 (ch341->ctrlin & CH341_CTI_C ? TIOCM_CTS : 0) |
+		 (ch341->ctrlin & CH341_CTI_DS ? TIOCM_DSR : 0) |
+		 (ch341->ctrlin & CH341_CTRL_RI ? TIOCM_RI : 0) |
+		 (ch341->ctrlin & CH341_CTI_DC ? TIOCM_CD : 0);
 	spin_unlock_irqrestore(&ch341->read_lock, flags);
 
 	return result;
 }
 
-static int ch341_tty_tiocmset(struct tty_struct *tty, unsigned int set, unsigned int clear)
+static int ch341_tty_tiocmset(struct tty_struct *tty, unsigned int set,
+			      unsigned int clear)
 {
 	struct ch341 *ch341 = tty->driver_data;
 	unsigned int newctrl;
 
 	newctrl = ch341->ctrlout;
-	set = (set & TIOCM_DTR ? CH341_CTO_D : 0) | (set & TIOCM_RTS ? CH341_CTO_R : 0);
-	clear = (clear & TIOCM_DTR ? CH341_CTO_D : 0) | (clear & TIOCM_RTS ? CH341_CTO_R : 0);
+	set = (set & TIOCM_DTR ? CH341_CTO_D : 0) |
+	      (set & TIOCM_RTS ? CH341_CTO_R : 0);
+	clear = (clear & TIOCM_DTR ? CH341_CTO_D : 0) |
+		(clear & TIOCM_RTS ? CH341_CTO_R : 0);
 	newctrl = (newctrl & ~clear) | set;
 	if (C_CRTSCTS(tty))
 		newctrl |= CH341_CTO_R;
@@ -788,7 +948,8 @@ static int ch341_tty_tiocmset(struct tty_struct *tty, unsigned int set, unsigned
 	return ch341_set_control(ch341, ch341->ctrlout = newctrl);
 }
 
-static int ch341_get_icount(struct tty_struct *tty, struct serial_icounter_struct *icount)
+static int ch341_get_icount(struct tty_struct *tty,
+			    struct serial_icounter_struct *icount)
 {
 	struct ch341 *ch341 = tty->driver_data;
 	struct async_icount cnow;
@@ -813,7 +974,8 @@ static int ch341_get_icount(struct tty_struct *tty, struct serial_icounter_struc
 	return 0;
 }
 
-static int get_serial_info(struct ch341 *ch341, struct serial_struct __user *info)
+static int get_serial_info(struct ch341 *ch341,
+			   struct serial_struct __user *info)
 {
 	struct serial_struct tmp;
 
@@ -825,15 +987,18 @@ static int get_serial_info(struct ch341 *ch341, struct serial_struct __user *inf
 	tmp.xmit_fifo_size = ch341->writesize;
 	tmp.baud_base = le32_to_cpu(ch341->line.dwDTERate);
 	tmp.close_delay = ch341->port.close_delay / 10;
-	tmp.closing_wait = ch341->port.closing_wait == ASYNC_CLOSING_WAIT_NONE ? ASYNC_CLOSING_WAIT_NONE :
-										 ch341->port.closing_wait / 10;
+	tmp.closing_wait = ch341->port.closing_wait ==
+					   ASYNC_CLOSING_WAIT_NONE ?
+				   ASYNC_CLOSING_WAIT_NONE :
+				   ch341->port.closing_wait / 10;
 	if (copy_to_user(info, &tmp, sizeof(tmp)))
 		return -EFAULT;
 	else
 		return 0;
 }
 
-static int set_serial_info(struct ch341 *ch341, struct serial_struct __user *newinfo)
+static int set_serial_info(struct ch341 *ch341,
+			   struct serial_struct __user *newinfo)
 {
 	struct serial_struct new_serial;
 	unsigned int closing_wait, close_delay;
@@ -843,12 +1008,14 @@ static int set_serial_info(struct ch341 *ch341, struct serial_struct __user *new
 		return -EFAULT;
 
 	close_delay = new_serial.close_delay * 10;
-	closing_wait = new_serial.closing_wait == ASYNC_CLOSING_WAIT_NONE ? ASYNC_CLOSING_WAIT_NONE :
-									    new_serial.closing_wait * 10;
+	closing_wait = new_serial.closing_wait == ASYNC_CLOSING_WAIT_NONE ?
+			       ASYNC_CLOSING_WAIT_NONE :
+			       new_serial.closing_wait * 10;
 
 	mutex_lock(&ch341->port.mutex);
 	if (!capable(CAP_SYS_ADMIN)) {
-		if ((close_delay != ch341->port.close_delay) || (closing_wait != ch341->port.closing_wait))
+		if ((close_delay != ch341->port.close_delay) ||
+		    (closing_wait != ch341->port.closing_wait))
 			retval = -EPERM;
 		else
 			retval = -EOPNOTSUPP;
@@ -898,7 +1065,8 @@ static int wait_serial_change(struct ch341 *ch341, unsigned long arg)
 	return rv;
 }
 
-static int get_serial_usage(struct ch341 *ch341, struct serial_icounter_struct __user *count)
+static int get_serial_usage(struct ch341 *ch341,
+			    struct serial_icounter_struct __user *count)
 {
 	struct serial_icounter_struct icount;
 	int rv = 0;
@@ -922,17 +1090,20 @@ static int get_serial_usage(struct ch341 *ch341, struct serial_icounter_struct _
 	return rv;
 }
 
-static int ch341_tty_ioctl(struct tty_struct *tty, unsigned int cmd, unsigned long arg)
+static int ch341_tty_ioctl(struct tty_struct *tty, unsigned int cmd,
+			   unsigned long arg)
 {
 	struct ch341 *ch341 = tty->driver_data;
 	int rv = -ENOIOCTLCMD;
 
 	switch (cmd) {
 	case TIOCGSERIAL: /* gets serial port data */
-		rv = get_serial_info(ch341, (struct serial_struct __user *)arg);
+		rv = get_serial_info(ch341,
+				     (struct serial_struct __user *)arg);
 		break;
 	case TIOCSSERIAL:
-		rv = set_serial_info(ch341, (struct serial_struct __user *)arg);
+		rv = set_serial_info(ch341,
+				     (struct serial_struct __user *)arg);
 		break;
 	case TIOCMIWAIT:
 		rv = usb_autopm_get_interface(ch341->data);
@@ -944,14 +1115,17 @@ static int ch341_tty_ioctl(struct tty_struct *tty, unsigned int cmd, unsigned lo
 		usb_autopm_put_interface(ch341->data);
 		break;
 	case TIOCGICOUNT:
-		rv = get_serial_usage(ch341, (struct serial_icounter_struct __user *)arg);
+		rv = get_serial_usage(
+			ch341,
+			(struct serial_icounter_struct __user *)arg);
 		break;
 	}
 
 	return rv;
 }
 
-static int ch341_get(unsigned int baval, unsigned char *factor, unsigned char *divisor)
+static int ch341_get(unsigned int baval, unsigned char *factor,
+		     unsigned char *divisor)
 {
 	unsigned char a;
 	unsigned char b;
@@ -995,13 +1169,19 @@ static int ch341_get(unsigned int baval, unsigned char *factor, unsigned char *d
 }
 
 #if (LINUX_VERSION_CODE >= KERNEL_VERSION(6, 1, 0))
-static void ch341_tty_set_termios(struct tty_struct *tty, const struct ktermios *termios_old)
+static void ch341_tty_set_termios(struct tty_struct *tty,
+				  const struct ktermios *termios_old)
 #else
-static void ch341_tty_set_termios(struct tty_struct *tty, struct ktermios *termios_old)
+static void ch341_tty_set_termios(struct tty_struct *tty,
+				  struct ktermios *termios_old)
 #endif
 {
 	struct ch341 *ch341 = tty->driver_data;
+#if (LINUX_VERSION_CODE >= KERNEL_VERSION(3, 7, 0))
 	struct ktermios *termios = &tty->termios;
+#else
+	struct ktermios *termios = tty->termios;
+#endif
 	struct usb_ch341_line_coding newline;
 	int newctrl = ch341->ctrlout;
 
@@ -1013,7 +1193,13 @@ static void ch341_tty_set_termios(struct tty_struct *tty, struct ktermios *termi
 	unsigned short index = 0;
 	unsigned char timeout = 0;
 
-	if (termios_old && !tty_termios_hw_change(&tty->termios, termios_old)) {
+#if (LINUX_VERSION_CODE >= KERNEL_VERSION(3, 7, 0))
+	if (termios_old &&
+	    !tty_termios_hw_change(&tty->termios, termios_old)) {
+#else
+	if (termios_old &&
+	    !tty_termios_hw_change(tty->termios, termios_old)) {
+#endif
 		return;
 	}
 
@@ -1027,9 +1213,11 @@ static void ch341_tty_set_termios(struct tty_struct *tty, struct ktermios *termi
 	if (newline.bCharFormat == 2)
 		reg_value |= CH341_L_SB;
 
-	newline.bParityType = termios->c_cflag & PARENB ?
-				      (termios->c_cflag & PARODD ? 1 : 2) + (termios->c_cflag & CMSPAR ? 2 : 0) :
-				      0;
+	newline.bParityType =
+		termios->c_cflag & PARENB ?
+			(termios->c_cflag & PARODD ? 1 : 2) +
+				(termios->c_cflag & CMSPAR ? 2 : 0) :
+			0;
 
 	switch (newline.bParityType) {
 	case 0x01:
@@ -1124,7 +1312,8 @@ static void ch341_write_buffers_free(struct ch341 *ch341)
 	struct usb_device *usb_dev = interface_to_usbdev(ch341->data);
 
 	for (wb = &ch341->wb[0], i = 0; i < CH341_NW; i++, wb++)
-		usb_free_coherent(usb_dev, ch341->writesize, wb->buf, wb->dmah);
+		usb_free_coherent(usb_dev, ch341->writesize, wb->buf,
+				  wb->dmah);
 }
 
 static void ch341_read_buffers_free(struct ch341 *ch341)
@@ -1133,7 +1322,9 @@ static void ch341_read_buffers_free(struct ch341 *ch341)
 	int i;
 
 	for (i = 0; i < ch341->rx_buflimit; i++)
-		usb_free_coherent(usb_dev, ch341->readsize, ch341->read_buffers[i].base, ch341->read_buffers[i].dma);
+		usb_free_coherent(usb_dev, ch341->readsize,
+				  ch341->read_buffers[i].base,
+				  ch341->read_buffers[i].dma);
 }
 
 static int ch341_write_buffers_alloc(struct ch341 *ch341)
@@ -1142,12 +1333,15 @@ static int ch341_write_buffers_alloc(struct ch341 *ch341)
 	struct ch341_wb *wb;
 
 	for (wb = &ch341->wb[0], i = 0; i < CH341_NW; i++, wb++) {
-		wb->buf = usb_alloc_coherent(ch341->dev, ch341->writesize, GFP_KERNEL, &wb->dmah);
+		wb->buf = usb_alloc_coherent(ch341->dev, ch341->writesize,
+					     GFP_KERNEL, &wb->dmah);
 		if (!wb->buf) {
 			while (i != 0) {
 				--i;
 				--wb;
-				usb_free_coherent(ch341->dev, ch341->writesize, wb->buf, wb->dmah);
+				usb_free_coherent(ch341->dev,
+						  ch341->writesize,
+						  wb->buf, wb->dmah);
 			}
 			return -ENOMEM;
 		}
@@ -1155,7 +1349,8 @@ static int ch341_write_buffers_alloc(struct ch341 *ch341)
 	return 0;
 }
 
-static int ch341_probe(struct usb_interface *intf, const struct usb_device_id *id)
+static int ch341_probe(struct usb_interface *intf,
+		       const struct usb_device_id *id)
 {
 	struct usb_interface *data_interface;
 	struct usb_endpoint_descriptor *epctrl = NULL;
@@ -1204,7 +1399,8 @@ static int ch341_probe(struct usb_interface *intf, const struct usb_device_id *i
 	}
 
 	ctrlsize = usb_endpoint_maxp(epctrl);
-	readsize = usb_endpoint_maxp(epread) * (quirks == SINGLE_RX_URB ? 1 : 1);
+	readsize = usb_endpoint_maxp(epread) *
+		   (quirks == SINGLE_RX_URB ? 1 : 1);
 	ch341->writesize = usb_endpoint_maxp(epwrite) * 20;
 	ch341->data = data_interface;
 	ch341->minor = minor;
@@ -1218,13 +1414,15 @@ static int ch341_probe(struct usb_interface *intf, const struct usb_device_id *i
 	spin_lock_init(&ch341->write_lock);
 	spin_lock_init(&ch341->read_lock);
 	mutex_init(&ch341->mutex);
-	ch341->rx_endpoint = usb_rcvbulkpipe(usb_dev, epread->bEndpointAddress);
+	ch341->rx_endpoint =
+		usb_rcvbulkpipe(usb_dev, epread->bEndpointAddress);
 	tty_port_init(&ch341->port);
 	ch341->port.ops = &ch341_port_ops;
 	init_usb_anchor(&ch341->delayed);
 	ch341->quirks = quirks;
 
-	buf = usb_alloc_coherent(usb_dev, ctrlsize, GFP_KERNEL, &ch341->ctrl_dma);
+	buf = usb_alloc_coherent(usb_dev, ctrlsize, GFP_KERNEL,
+				 &ch341->ctrl_dma);
 	if (!buf)
 		goto alloc_fail2;
 	ch341->ctrl_buffer = buf;
@@ -1240,7 +1438,8 @@ static int ch341_probe(struct usb_interface *intf, const struct usb_device_id *i
 		struct ch341_rb *rb = &(ch341->read_buffers[i]);
 		struct urb *urb;
 
-		rb->base = usb_alloc_coherent(ch341->dev, readsize, GFP_KERNEL, &rb->dma);
+		rb->base = usb_alloc_coherent(ch341->dev, readsize,
+					      GFP_KERNEL, &rb->dma);
 		if (!rb->base)
 			goto alloc_fail6;
 		rb->index = i;
@@ -1252,7 +1451,8 @@ static int ch341_probe(struct usb_interface *intf, const struct usb_device_id *i
 
 		urb->transfer_flags |= URB_NO_TRANSFER_DMA_MAP;
 		urb->transfer_dma = rb->dma;
-		usb_fill_bulk_urb(urb, ch341->dev, ch341->rx_endpoint, rb->base, ch341->readsize,
+		usb_fill_bulk_urb(urb, ch341->dev, ch341->rx_endpoint,
+				  rb->base, ch341->readsize,
 				  ch341_read_bulk_callback, rb);
 
 		ch341->read_urbs[i] = urb;
@@ -1265,16 +1465,22 @@ static int ch341_probe(struct usb_interface *intf, const struct usb_device_id *i
 		if (snd->urb == NULL)
 			goto alloc_fail7;
 
-		usb_fill_bulk_urb(snd->urb, usb_dev, usb_sndbulkpipe(usb_dev, epwrite->bEndpointAddress), NULL,
-				  ch341->writesize, ch341_write_bulk, snd);
+		usb_fill_bulk_urb(
+			snd->urb, usb_dev,
+			usb_sndbulkpipe(usb_dev,
+					epwrite->bEndpointAddress),
+			NULL, ch341->writesize, ch341_write_bulk, snd);
 		snd->urb->transfer_flags |= URB_NO_TRANSFER_DMA_MAP;
 		snd->instance = ch341;
 	}
 
 	usb_set_intfdata(intf, ch341);
 
-	usb_fill_int_urb(ch341->ctrlurb, usb_dev, usb_rcvintpipe(usb_dev, epctrl->bEndpointAddress), ch341->ctrl_buffer,
-			 ctrlsize, ch341_ctrl_irq, ch341, epctrl->bInterval ? epctrl->bInterval : 16);
+	usb_fill_int_urb(ch341->ctrlurb, usb_dev,
+			 usb_rcvintpipe(usb_dev, epctrl->bEndpointAddress),
+			 ch341->ctrl_buffer, ctrlsize, ch341_ctrl_irq,
+			 ch341,
+			 epctrl->bInterval ? epctrl->bInterval : 16);
 	ch341->ctrlurb->transfer_flags |= URB_NO_TRANSFER_DMA_MAP;
 	ch341->ctrlurb->transfer_dma = ch341->ctrl_dma;
 
@@ -1285,11 +1491,16 @@ static int ch341_probe(struct usb_interface *intf, const struct usb_device_id *i
 
 	usb_get_intf(data_interface);
 	ch341->line.dwDTERate = 9600;
-	tty_dev = tty_port_register_device(&ch341->port, ch341_tty_driver, minor, &data_interface->dev);
+#if (LINUX_VERSION_CODE >= KERNEL_VERSION(3, 7, 0))
+	tty_dev = tty_port_register_device(&ch341->port, ch341_tty_driver,
+					   minor, &data_interface->dev);
 	if (IS_ERR(tty_dev)) {
 		rv = PTR_ERR(tty_dev);
 		goto alloc_fail7;
 	}
+#else
+	tty_register_device(ch341_tty_driver, minor, &data_interface->dev);
+#endif
 	return 0;
 
 alloc_fail7:
@@ -1304,7 +1515,8 @@ alloc_fail6:
 alloc_fail5:
 	ch341_write_buffers_free(ch341);
 alloc_fail4:
-	usb_free_coherent(usb_dev, ctrlsize, ch341->ctrl_buffer, ch341->ctrl_dma);
+	usb_free_coherent(usb_dev, ctrlsize, ch341->ctrl_buffer,
+			  ch341->ctrl_dma);
 alloc_fail2:
 	ch341_release_minor(ch341);
 	kfree(ch341);
@@ -1354,7 +1566,8 @@ static void ch341_disconnect(struct usb_interface *intf)
 	for (i = 0; i < ch341->rx_buflimit; i++)
 		usb_free_urb(ch341->read_urbs[i]);
 	ch341_write_buffers_free(ch341);
-	usb_free_coherent(usb_dev, ch341->ctrlsize, ch341->ctrl_buffer, ch341->ctrl_dma);
+	usb_free_coherent(usb_dev, ch341->ctrlsize, ch341->ctrl_buffer,
+			  ch341->ctrl_dma);
 	ch341_read_buffers_free(ch341);
 	usb_driver_release_interface(&ch341_driver, ch341->data);
 	tty_port_put(&ch341->port);
@@ -1425,8 +1638,13 @@ static int ch341_reset_resume(struct usb_interface *intf)
 #else
 	if (test_bit(ASYNCB_INITIALIZED, &ch341->port.flags))
 #endif
-		tty_port_tty_hangup(&ch341->port, false);
 
+#if (LINUX_VERSION_CODE < KERNEL_VERSION(3, 10, 0))
+		struct tty_struct *tty = tty_port_tty_get(&ch341->port);
+	tty_hangup(tty);
+#else
+		tty_port_tty_hangup(&ch341->port, false);
+#endif
 	return ch341_resume(intf);
 }
 #endif /* CONFIG_PM */
@@ -1434,12 +1652,14 @@ static int ch341_reset_resume(struct usb_interface *intf)
 /*
  * USB driver structure.
  */
-static const struct usb_device_id ch341_ids[] = { { USB_DEVICE(0x1a86, 0x7523) }, /* ch340 chip */
-						  { USB_DEVICE(0x1a86, 0x7522) }, /* ch340k chip */
-						  { USB_DEVICE(0x1a86, 0x5523) }, /* ch341 chip */
-						  { USB_DEVICE(0x1a86, 0xe523) }, /* ch330 chip */
-						  { USB_DEVICE(0x4348, 0x5523) }, /* ch340 custom chip */
-						  {} };
+static const struct usb_device_id ch341_ids[] = {
+	{ USB_DEVICE(0x1a86, 0x7523) }, /* ch340 chip */
+	{ USB_DEVICE(0x1a86, 0x7522) }, /* ch340k chip */
+	{ USB_DEVICE(0x1a86, 0x5523) }, /* ch341 chip */
+	{ USB_DEVICE(0x1a86, 0xe523) }, /* ch330 chip */
+	{ USB_DEVICE(0x4348, 0x5523) }, /* ch340 custom chip */
+	{}
+};
 
 MODULE_DEVICE_TABLE(usb, ch341_ids);
 
@@ -1456,7 +1676,9 @@ static struct usb_driver ch341_driver = {
 #ifdef CONFIG_PM
 	.supports_autosuspend = 1,
 #endif
+#if (LINUX_VERSION_CODE >= KERNEL_VERSION(3, 5, 0))
 	.disable_hub_initiated_lpm = 1,
+#endif
 };
 
 /*
@@ -1483,7 +1705,9 @@ static int __init ch341_init(void)
 {
 	int retval;
 #if (LINUX_VERSION_CODE >= KERNEL_VERSION(5, 15, 0))
-	ch341_tty_driver = tty_alloc_driver(CH341_TTY_MINORS, TTY_DRIVER_REAL_RAW | TTY_DRIVER_DYNAMIC_DEV);
+	ch341_tty_driver = tty_alloc_driver(
+		CH341_TTY_MINORS,
+		TTY_DRIVER_REAL_RAW | TTY_DRIVER_DYNAMIC_DEV);
 	if (IS_ERR(ch341_tty_driver))
 		return PTR_ERR(ch341_tty_driver);
 #else
@@ -1491,14 +1715,19 @@ static int __init ch341_init(void)
 	if (!ch341_tty_driver)
 		return -ENOMEM;
 #endif
-	ch341_tty_driver->driver_name = "ch341_uart", ch341_tty_driver->name = "ttyCH341USB",
-	ch341_tty_driver->major = CH341_TTY_MAJOR, ch341_tty_driver->minor_start = 0,
-	ch341_tty_driver->type = TTY_DRIVER_TYPE_SERIAL, ch341_tty_driver->subtype = SERIAL_TYPE_NORMAL,
+	ch341_tty_driver->driver_name = "ch341_uart",
+	ch341_tty_driver->name = "ttyCH341USB",
+	ch341_tty_driver->major = CH341_TTY_MAJOR,
+	ch341_tty_driver->minor_start = 0,
+	ch341_tty_driver->type = TTY_DRIVER_TYPE_SERIAL,
+	ch341_tty_driver->subtype = SERIAL_TYPE_NORMAL,
 #if (LINUX_VERSION_CODE < KERNEL_VERSION(5, 15, 0))
-	ch341_tty_driver->flags = TTY_DRIVER_REAL_RAW | TTY_DRIVER_DYNAMIC_DEV;
+	ch341_tty_driver->flags = TTY_DRIVER_REAL_RAW |
+				  TTY_DRIVER_DYNAMIC_DEV;
 #endif
 	ch341_tty_driver->init_termios = tty_std_termios;
-	ch341_tty_driver->init_termios.c_cflag = B0 | CS8 | CREAD | HUPCL | CLOCAL;
+	ch341_tty_driver->init_termios.c_cflag = B0 | CS8 | CREAD | HUPCL |
+						 CLOCAL;
 	tty_set_operations(ch341_tty_driver, &ch341_ops);
 
 	retval = tty_register_driver(ch341_tty_driver);
@@ -1537,7 +1766,9 @@ static void __exit ch341_exit(void)
 #else
 	put_tty_driver(ch341_tty_driver);
 #endif
+#if (LINUX_VERSION_CODE >= KERNEL_VERSION(3, 5, 0))
 	idr_destroy(&ch341_minors);
+#endif
 	printk(KERN_INFO KBUILD_MODNAME ": "
 					"ch341 driver exit.\n");
 }
