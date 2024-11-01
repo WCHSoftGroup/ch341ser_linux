@@ -1,7 +1,9 @@
 # ch341 linux serial driver
 ## Description
 
-USB serial driver for USB to UART chip ch340, ch341, etc. In fact Linux mainline kernels have built-in ch341 serial driver since kernel version 2.6.24. The location is: drivers/usb/serial/ch341.c, it's a pity that the built-in driver cannot be kept up to date. We suggest our customers to use this driver.
+USB serial driver for USB to UART chip ch340, ch341, etc. ch341 supports multiple working modes, this driver only supports its serial port mode.
+
+In fact the ch341 serial driver has been built-in since the Linux mainline kernel version 2.6.24. The location is: drivers/usb/serial/ch341.c, it's a pity that the built-in driver cannot be kept up to date and cannot support all features of the chip. We suggest our customers to use this driver.
 
 1. Open "Terminal"
 2. Switch to "driver" directory
