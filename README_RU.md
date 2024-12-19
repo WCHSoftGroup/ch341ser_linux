@@ -17,3 +17,14 @@ ch341 драйвер последовательного порта Linux
 Перед тем, как драйвер заработает, необходимо убедиться, что USB-устройство подключено и работает правильно. Для подтверждения этого можно использовать команду оболочки «lsusb» или «dmesg». USB-VID этих устройств — [1a86]. Все идентификаторы можно просмотреть в таблице идентификаторов, которая определена в «ch341.c».
 
 Если устройство работает нормально, драйвер создаст tty-устройства с именами «ttyCH341USBx» в каталоге /dev.
+
+
+
+1. Open "Terminal"
+2. Switch to "driver" directory
+3. Compile the driver using "make", you will see the module "ch341.ko" if successful
+4. Type "sudo make load" or "sudo insmod ch341.ko" to load the driver dynamically
+5. Type "sudo make unload" or "sudo rmmod ch341.ko" to unload the driver
+6. Type "sudo make install" to make the driver work permanently
+7. Type "sudo make uninstall" to remove the driver
+8. You can refer to the link below to acquire uart application, you can use gcc or Cross-compile with cross-gcc
