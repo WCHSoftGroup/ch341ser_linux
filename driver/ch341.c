@@ -29,6 +29,9 @@
  *      - fix data analysis in status ep callback
  * V1.7 - add support for kernel version beyond 6.3.x
  * V1.8 - add support for kernel version beyond 6.5.x
+ * V1.9 - add support for kernel version beyond 6.11.x
+ *      - enable the low_latency flag to resolve the issue of slow serial port data notifications 
+ *        in some systems
  */
 
 #define DEBUG
@@ -55,7 +58,11 @@
 #include <linux/usb/cdc.h>
 #include <linux/version.h>
 #include <asm/byteorder.h>
+#if (LINUX_VERSION_CODE >= KERNEL_VERSION(6, 12, 0))
+#include <linux/unaligned.h>
+#else
 #include <asm/unaligned.h>
+#endif
 
 #if (LINUX_VERSION_CODE >= KERNEL_VERSION(4, 11, 0))
 #include <linux/sched/signal.h>
@@ -64,8 +71,8 @@
 #include "ch341.h"
 
 #define DRIVER_AUTHOR "WCH"
-#define DRIVER_DESC "USB serial driver for ch340, ch341, etc."
-#define VERSION_DESC "V1.8 On 2024.08"
+#define DRIVER_DESC "USB serial driver for CH340, CH341, etc."
+#define VERSION_DESC "V1.9 On 2025.12"
 
 static struct usb_driver ch341_driver;
 static struct tty_driver *ch341_tty_driver;
@@ -649,6 +656,9 @@ static void ch341_port_dtr_rts(struct tty_port *port, int raise)
 	struct ch341 *ch341 = container_of(port, struct ch341, port);
 	int res;
 
+#ifdef IGNORE_RTSDTR
+	return;
+#endif
 	if (raise)
 		ch341->ctrlout |= CH341_CTO_D | CH341_CTO_R;
 	else
@@ -1023,6 +1033,11 @@ static int set_serial_info(struct ch341 *ch341,
 		ch341->port.close_delay = close_delay;
 		ch341->port.closing_wait = closing_wait;
 	}
+	
+#if (LINUX_VERSION_CODE < KERNEL_VERSION(5, 12, 0))
+	ch341->port.low_latency =
+		(ch341->port.flags & ASYNC_LOW_LATENCY) ? 1 : 0;
+#endif
 	mutex_unlock(&ch341->port.mutex);
 
 	return retval;
@@ -1055,6 +1070,9 @@ static int wait_serial_change(struct ch341 *ch341, unsigned long arg)
 		schedule();
 		remove_wait_queue(&ch341->wioctl, &wait);
 		if (ch341->disconnected) {
+			if (arg & TIOCM_CD)
+				break;
+			else
 			rv = -ENODEV;
 		} else {
 			if (signal_pending(current))
@@ -1726,8 +1744,11 @@ static int __init ch341_init(void)
 				  TTY_DRIVER_DYNAMIC_DEV;
 #endif
 	ch341_tty_driver->init_termios = tty_std_termios;
-	ch341_tty_driver->init_termios.c_cflag = B0 | CS8 | CREAD | HUPCL |
-						 CLOCAL;
+	ch341_tty_driver->init_termios.c_cflag = B115200 | CS8 | CREAD |
+						 HUPCL | CLOCAL;
+	ch341_tty_driver->init_termios.c_lflag &=
+		~(ECHO | ECHONL | ICANON | ISIG);
+	ch341_tty_driver->init_termios.c_oflag &= ~OPOST;
 	tty_set_operations(ch341_tty_driver, &ch341_ops);
 
 	retval = tty_register_driver(ch341_tty_driver);

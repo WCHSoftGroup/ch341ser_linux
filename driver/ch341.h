@@ -7,6 +7,8 @@
 
 #ifndef _CH341_H
 #define _CH341_H
+#define IGNORE_RTSDTR
+#undef IGNORE_RTSDTR
 
 /*
  * Baud rate and default timeout
